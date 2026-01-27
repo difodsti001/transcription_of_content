@@ -138,14 +138,13 @@ def transcribe_youtube(url):
                 'preferredquality': '192',
             }],
             'outtmpl': temp_filename,
-            'quiet': False,
+            'quiet': True,
             'no_warnings': False,
-            'verbose': True,  # Más detalles
+            'verbose': False, 
             'nocheckcertificate': True,
             'ignoreerrors': False,
             'no_color': True,
             'extractaudio': True,
-            # Opciones adicionales para evitar bloqueos
             'socket_timeout': 30,
             'retries': 3,
             'fragment_retries': 3,
@@ -187,7 +186,6 @@ def transcribe_youtube(url):
         print("🔍 Buscando archivo de audio descargado...")
         audio_path = f"{temp_filename}.mp3"
         
-        # Si no existe, buscar con otras extensiones
         if not os.path.exists(audio_path):
             for ext in ['.m4a', '.webm', '.opus', '.ogg']:
                 alt_path = f"{temp_filename}{ext}"
@@ -199,7 +197,6 @@ def transcribe_youtube(url):
         if not os.path.exists(audio_path):
             print("❌ No se encontró el archivo de audio después de la descarga")
             print(f"   Buscado: {audio_path}")
-            # Listar archivos en el directorio temporal para debug
             print(f"   Archivos en {temp_dir}:")
             for f in os.listdir(temp_dir):
                 if 'yt_audio' in f:
@@ -905,6 +902,7 @@ async def download_text(text: str = Form(...), format: str = Form("txt")):
     )
 
 if __name__ == "__main__":
+    # Abrir navegador automáticamente
     import webbrowser
     from threading import Timer
     
