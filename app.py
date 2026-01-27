@@ -29,10 +29,18 @@ app.add_middleware(
 print("=== SISTEMA DE TRANSCRIPCIÓN EDUCATIVA ===")
 
 # Verificar FFmpeg
-if os.path.exists("ffmpeg.exe") or os.system("ffmpeg -version > nul 2>&1") == 0:
-    print("✅ FFmpeg detectado correctamente")
+ffmpeg_available = False
+if os.path.exists("ffmpeg.exe"):
+    print("✅ FFmpeg detectado (ffmpeg.exe)")
+    ffmpeg_available = True
+elif os.system("ffmpeg -version > nul 2>&1" if os.name == 'nt' else "ffmpeg -version > /dev/null 2>&1") == 0:
+    print("✅ FFmpeg detectado correctamente en PATH")
+    ffmpeg_available = True
 else:
-    print("⚠️ ADVERTENCIA: FFmpeg no encontrado")
+    print("❌ ERROR CRÍTICO: FFmpeg NO encontrado")
+    print("   SOLUCIÓN: Descarga FFmpeg de https://ffmpeg.org/download.html")
+    print("   - Windows: Descarga ffmpeg.exe y colócalo en la misma carpeta")
+    print("   - Linux/Mac: sudo apt install ffmpeg  o  brew install ffmpeg")
 
 # Cargar motores
 print("🔄 Cargando OCR (EasyOCR)...")
@@ -42,7 +50,7 @@ print("🔄 Cargando Whisper (Transcripción de audio)...")
 audio_model = whisper.load_model("base")
 
 print("✅ TODOS LOS MOTORES LISTOS")
-print("🌐 Abriendo navegador en http://localhost:7000\n")
+print("🌐 Servidor iniciado en http://localhost:7000\n")
 
 # ==================== FUNCIONES DE EXTRACCIÓN ====================
 
@@ -65,27 +73,63 @@ def extract_image_ocr(file_bytes):
         return f"Error OCR: {str(e)}"
 
 def transcribe_audio_video(file_bytes, file_ext):
-    """Transcripción de audio/video - solo texto"""
+    """Transcripción de audio/video con timestamps"""
     try:
         with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as tmp_file:
             tmp_file.write(file_bytes)
             tmp_path = tmp_file.name
 
-        # Transcribir y obtener solo el texto
+        # Transcribir con timestamps
         result = audio_model.transcribe(tmp_path, fp16=False, verbose=False)
         
         os.remove(tmp_path)
         
-        # Retornar solo el texto completo
-        return result.get("text", "").strip()
+        # Formatear con timestamps
+        formatted_text = format_transcription_with_timestamps(result)
         
+        return formatted_text
     except Exception as e:
         return f"Error Transcripción: {str(e)}"
 
+def format_transcription_with_timestamps(result):
+    """Formatea la transcripción con marcas de tiempo"""
+    if "segments" not in result:
+        return result.get("text", "")
+    
+    formatted = []
+    for segment in result["segments"]:
+        start_time = format_timestamp(segment["start"])
+        text = segment["text"].strip()
+        formatted.append(f"[{start_time}] {text}")
+    
+    return "\n".join(formatted)
+
+def format_timestamp(seconds):
+    """Convierte segundos a formato MM:SS"""
+    mins = int(seconds // 60)
+    secs = int(seconds % 60)
+    return f"{mins:02d}:{secs:02d}"
+
 def transcribe_youtube(url):
-    """Descarga audio de YouTube y transcribe - solo texto"""
+    """Descarga audio de YouTube y transcribe - VERSIÓN MEJORADA"""
+    audio_path = None
+    
+    # Verificar FFmpeg
+    if not ffmpeg_available:
+        return "ERROR: FFmpeg no está instalado. Es necesario para descargar audio de YouTube. Descárgalo de https://ffmpeg.org/download.html", None
+    
     try:
-        # Configuración de yt-dlp
+        # Crear directorio temporal
+        temp_dir = tempfile.gettempdir()
+        temp_filename = os.path.join(temp_dir, f"yt_audio_{os.getpid()}")
+        
+        print(f"\n{'='*60}")
+        print(f"🎬 INICIANDO DESCARGA DE YOUTUBE")
+        print(f"{'='*60}")
+        print(f"📍 URL: {url}")
+        print(f"📁 Archivo temporal: {temp_filename}")
+        
+        # Configuración mejorada de yt-dlp con más opciones
         ydl_opts = {
             'format': 'bestaudio/best',
             'postprocessors': [{
@@ -93,31 +137,105 @@ def transcribe_youtube(url):
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }],
-            'outtmpl': 'temp_yt_audio.%(ext)s',
-            'quiet': True,
-            'no_warnings': True,
+            'outtmpl': temp_filename,
+            'quiet': False,
+            'no_warnings': False,
+            'verbose': True,  # Más detalles
+            'nocheckcertificate': True,
+            'ignoreerrors': False,
+            'no_color': True,
+            'extractaudio': True,
+            # Opciones adicionales para evitar bloqueos
+            'socket_timeout': 30,
+            'retries': 3,
+            'fragment_retries': 3,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-us,en;q=0.5',
+                'Sec-Fetch-Mode': 'navigate',
+            }
         }
+        
+        print("🔄 Extrayendo información del video...")
         
         # Descargar audio
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            title = info.get('title', 'Video de YouTube')
+            try:
+                info = ydl.extract_info(url, download=True)
+                title = info.get('title', 'Video de YouTube')
+                duration = info.get('duration', 0)
+                print(f"✅ Video encontrado: {title}")
+                print(f"⏱️  Duración: {duration} segundos")
+            except yt_dlp.utils.DownloadError as e:
+                error_msg = str(e)
+                print(f"❌ Error de descarga: {error_msg}")
+                
+                if "Video unavailable" in error_msg:
+                    return "❌ El video no está disponible. Puede ser privado, estar bloqueado en tu región o haber sido eliminado.", None
+                elif "Sign in" in error_msg or "age" in error_msg.lower():
+                    return "❌ Este video requiere iniciar sesión o verificación de edad. No se puede descargar.", None
+                elif "Copyright" in error_msg:
+                    return "❌ Este video tiene restricciones de copyright y no se puede descargar.", None
+                else:
+                    return f"❌ Error al descargar: {error_msg}", None
+            except Exception as e:
+                print(f"❌ Error inesperado en descarga: {str(e)}")
+                return f"❌ Error al procesar el video: {str(e)}", None
+        
+        # Buscar el archivo de audio generado
+        print("🔍 Buscando archivo de audio descargado...")
+        audio_path = f"{temp_filename}.mp3"
+        
+        # Si no existe, buscar con otras extensiones
+        if not os.path.exists(audio_path):
+            for ext in ['.m4a', '.webm', '.opus', '.ogg']:
+                alt_path = f"{temp_filename}{ext}"
+                if os.path.exists(alt_path):
+                    audio_path = alt_path
+                    print(f"✅ Archivo encontrado: {alt_path}")
+                    break
+        
+        if not os.path.exists(audio_path):
+            print("❌ No se encontró el archivo de audio después de la descarga")
+            print(f"   Buscado: {audio_path}")
+            # Listar archivos en el directorio temporal para debug
+            print(f"   Archivos en {temp_dir}:")
+            for f in os.listdir(temp_dir):
+                if 'yt_audio' in f:
+                    print(f"   - {f}")
+            return "❌ Error: El audio se descargó pero no se encontró el archivo. Verifica que FFmpeg esté correctamente instalado.", None
+        
+        print(f"✅ Archivo de audio listo: {os.path.basename(audio_path)}")
+        file_size = os.path.getsize(audio_path) / (1024 * 1024)  # MB
+        print(f"📦 Tamaño: {file_size:.2f} MB")
+        
+        print("🔄 Iniciando transcripción con Whisper...")
         
         # Transcribir
-        audio_path = "temp_yt_audio.mp3"
-        if not os.path.exists(audio_path):
-            return "Error: No se pudo descargar el audio", None
-        
         result = audio_model.transcribe(audio_path, fp16=False, verbose=False)
+        formatted_text = format_transcription_with_timestamps(result)
         
-        # Limpiar archivo temporal
-        os.remove(audio_path)
+        print(f"✅ Transcripción completada: {len(formatted_text)} caracteres")
+        print(f"{'='*60}\n")
         
-        # Retornar solo el texto completo
-        return result.get("text", "").strip(), title
+        return formatted_text, title
         
     except Exception as e:
-        return f"Error YouTube: {str(e)}", None
+        error_msg = f"❌ Error inesperado: {str(e)}"
+        print(error_msg)
+        import traceback
+        print(traceback.format_exc())
+        return error_msg, None
+    
+    finally:
+        # Limpiar archivo temporal
+        if audio_path and os.path.exists(audio_path):
+            try:
+                os.remove(audio_path)
+                print(f"🗑️  Archivo temporal eliminado: {os.path.basename(audio_path)}")
+            except Exception as e:
+                print(f"⚠️  No se pudo eliminar archivo temporal: {e}")
 
 def extract_plain_text(file_bytes):
     """Lee archivos de texto plano"""
@@ -228,23 +346,38 @@ HTML_CONTENT = """
         
         .card:hover {
             box-shadow: var(--shadow-lg);
-            transform: translateY(-2px);
+            transform: translateY(-4px);
         }
         
-        .card-title {
-            font-size: 1.3rem;
-            font-weight: 600;
-            margin-bottom: 20px;
-            color: var(--primary);
+        .card-icon {
+            width: 60px;
+            height: 60px;
+            background: linear-gradient(135deg, var(--primary), var(--accent));
+            border-radius: 12px;
             display: flex;
             align-items: center;
-            gap: 10px;
+            justify-content: center;
+            font-size: 24px;
+            color: white;
+            margin-bottom: 20px;
+        }
+        
+        .card h3 {
+            font-size: 1.5rem;
+            margin-bottom: 10px;
+            color: var(--text-main);
+        }
+        
+        .card p {
+            color: var(--text-sub);
+            margin-bottom: 20px;
+            line-height: 1.6;
         }
         
         .upload-zone {
             border: 3px dashed var(--border);
             border-radius: var(--radius);
-            padding: 50px 30px;
+            padding: 50px 20px;
             text-align: center;
             cursor: pointer;
             transition: all 0.3s ease;
@@ -254,94 +387,71 @@ HTML_CONTENT = """
         .upload-zone:hover {
             border-color: var(--primary);
             background: white;
-            transform: scale(1.02);
         }
         
-        .upload-icon {
-            width: 80px;
-            height: 80px;
-            background: linear-gradient(135deg, var(--primary), var(--secondary));
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin: 0 auto 20px;
-            box-shadow: 0 8px 16px rgba(8, 145, 178, 0.2);
-        }
-        
-        .upload-icon i {
-            font-size: 36px;
-            color: white;
-        }
-        
-        .upload-zone h3 {
-            color: var(--text-main);
-            margin-bottom: 10px;
+        .upload-zone i {
+            font-size: 48px;
+            color: var(--primary);
+            margin-bottom: 15px;
         }
         
         .upload-zone p {
             color: var(--text-sub);
-            font-size: 0.95rem;
-        }
-        
-        .youtube-input-group {
-            display: flex;
-            gap: 10px;
-            margin-top: 15px;
+            font-size: 1rem;
         }
         
         .youtube-input {
+            display: flex;
+            gap: 10px;
+        }
+        
+        input[type="text"] {
             flex: 1;
-            padding: 14px 18px;
+            padding: 15px;
             border: 2px solid var(--border);
             border-radius: 12px;
             font-size: 1rem;
-            transition: all 0.3s;
+            transition: border-color 0.3s;
         }
         
-        .youtube-input:focus {
+        input[type="text"]:focus {
             outline: none;
             border-color: var(--primary);
-            box-shadow: 0 0 0 3px rgba(8, 145, 178, 0.1);
         }
         
         .btn {
-            padding: 14px 28px;
+            padding: 15px 30px;
             border: none;
             border-radius: 12px;
+            font-size: 1rem;
             font-weight: 600;
             cursor: pointer;
-            transition: all 0.3s;
-            display: flex;
+            transition: all 0.3s ease;
+            display: inline-flex;
             align-items: center;
             gap: 8px;
-            font-size: 1rem;
         }
         
         .btn-primary {
-            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            background: linear-gradient(135deg, var(--primary), var(--accent));
             color: white;
-            box-shadow: 0 4px 12px rgba(8, 145, 178, 0.3);
         }
         
         .btn-primary:hover {
             transform: translateY(-2px);
-            box-shadow: 0 6px 16px rgba(8, 145, 178, 0.4);
+            box-shadow: var(--shadow-lg);
         }
         
-        .btn-secondary {
-            background: var(--accent);
-            color: white;
-        }
-        
-        .btn-secondary:hover {
-            background: #059669;
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
         }
         
         .btn-outline {
-            background: white;
-            color: var(--primary);
+            background: transparent;
             border: 2px solid var(--primary);
+            color: var(--primary);
         }
         
         .btn-outline:hover {
@@ -349,13 +459,55 @@ HTML_CONTENT = """
             color: white;
         }
         
-        .results-area {
-            display: none;
-            animation: fadeIn 0.5s ease;
+        .btn-small {
+            padding: 10px 20px;
+            font-size: 0.9rem;
         }
         
-        .results-area.active {
+        .loading, .results {
+            display: none;
+        }
+        
+        .loading.active, .results.active {
             display: block;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 60px 30px;
+            background: white;
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+        }
+        
+        .spinner {
+            width: 60px;
+            height: 60px;
+            border: 5px solid var(--bg-card-hover);
+            border-top-color: var(--primary);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .loading h3 {
+            color: var(--text-main);
+            margin-bottom: 10px;
+        }
+        
+        .loading p {
+            color: var(--text-sub);
+        }
+        
+        .results {
+            background: white;
+            border-radius: var(--radius);
+            padding: 30px;
+            box-shadow: var(--shadow);
         }
         
         .result-header {
@@ -363,172 +515,119 @@ HTML_CONTENT = """
             justify-content: space-between;
             align-items: center;
             margin-bottom: 20px;
-            padding: 20px;
-            background: linear-gradient(135deg, var(--bg-card-hover), white);
-            border-radius: 12px;
-            border: 1px solid var(--border);
+            padding-bottom: 20px;
+            border-bottom: 2px solid var(--bg-card-hover);
         }
         
-        .file-info h3 {
+        .result-info h3 {
+            font-size: 1.5rem;
             color: var(--text-main);
-            font-size: 1.2rem;
             margin-bottom: 5px;
         }
         
-        .file-meta {
+        .result-info p {
             color: var(--text-sub);
-            font-size: 0.9rem;
         }
         
         .badge {
-            background: linear-gradient(135deg, var(--accent), #34d399);
-            color: white;
             padding: 8px 16px;
+            background: linear-gradient(135deg, var(--primary), var(--accent));
+            color: white;
             border-radius: 20px;
             font-size: 0.85rem;
             font-weight: 600;
-            box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3);
-        }
-        
-        .text-display {
-            position: relative;
-            border: 2px solid var(--border);
-            border-radius: 12px;
-            overflow: hidden;
-            background: white;
-        }
-        
-        .text-area {
-            width: 100%;
-            min-height: 400px;
-            padding: 20px;
-            border: none;
-            font-family: 'Courier New', monospace;
-            font-size: 0.95rem;
-            line-height: 1.6;
-            resize: vertical;
-            color: var(--text-main);
-        }
-        
-        .text-area:focus {
-            outline: none;
-        }
-        
-        .action-bar {
-            display: flex;
-            gap: 12px;
-            justify-content: flex-end;
-            padding: 15px 20px;
-            background: var(--bg-card-hover);
-            border-top: 1px solid var(--border);
-        }
-        
-        .btn-small {
-            padding: 10px 18px;
-            font-size: 0.9rem;
-        }
-        
-        .loading {
-            display: none;
-            text-align: center;
-            padding: 40px;
-        }
-        
-        .loading.active {
-            display: block;
-        }
-        
-        .spinner {
-            width: 60px;
-            height: 60px;
-            border: 4px solid var(--bg-card-hover);
-            border-top: 4px solid var(--primary);
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-            margin: 0 auto 20px;
-        }
-        
-        .loading-text {
-            color: var(--text-sub);
-            font-size: 1.1rem;
-        }
-        
-        @keyframes spin {
-            100% { transform: rotate(360deg); }
-        }
-        
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(10px); }
-            to { opacity: 1; transform: translateY(0); }
         }
         
         .stats {
-            display: flex;
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
             gap: 15px;
-            margin-top: 15px;
+            margin-bottom: 20px;
         }
         
-        .stat-item {
-            background: white;
-            padding: 12px 20px;
-            border-radius: 10px;
-            border: 1px solid var(--border);
-            flex: 1;
+        .stat-card {
+            background: var(--bg-card-hover);
+            padding: 15px;
+            border-radius: 12px;
             text-align: center;
         }
         
-        .stat-value {
-            font-size: 1.5rem;
-            font-weight: 700;
+        .stat-card i {
+            font-size: 24px;
             color: var(--primary);
+            margin-bottom: 8px;
         }
         
-        .stat-label {
-            font-size: 0.85rem;
+        .stat-card strong {
+            display: block;
+            font-size: 1.5rem;
+            color: var(--text-main);
+            margin-bottom: 5px;
+        }
+        
+        .stat-card span {
             color: var(--text-sub);
-            margin-top: 5px;
+            font-size: 0.9rem;
+        }
+        
+        textarea {
+            width: 100%;
+            min-height: 300px;
+            padding: 20px;
+            border: 2px solid var(--border);
+            border-radius: 12px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.95rem;
+            resize: vertical;
+            margin-bottom: 20px;
+        }
+        
+        textarea:focus {
+            outline: none;
+            border-color: var(--primary);
+        }
+        
+        .actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        
+        input[type="file"] {
+            display: none;
         }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1><i class="fa-solid fa-graduation-cap"></i> Sistema de Transcripción Educativa</h1>
-            <p>Extrae y transcribe contenido de cursos en múltiples formatos</p>
+            <h1><i class="fa-solid fa-microphone-lines"></i> Sistema de Transcripción</h1>
+            <p>Convierte audio, video, imágenes y documentos a texto</p>
         </div>
         
         <div class="grid">
             <div class="card">
-                <div class="card-title">
-                    <i class="fa-solid fa-cloud-arrow-up"></i> Subir Archivo
+                <div class="card-icon">
+                    <i class="fa-solid fa-file-arrow-up"></i>
                 </div>
+                <h3>Subir Archivo</h3>
+                <p>Soporta: MP3, MP4, PDF, imágenes, texto</p>
+                <input type="file" id="file-input" accept=".mp3,.mp4,.wav,.m4a,.png,.jpg,.jpeg,.pdf,.txt,.md">
                 <div class="upload-zone" id="upload-zone">
-                    <input type="file" id="file-input" hidden>
-                    <div class="upload-icon">
-                        <i class="fa-solid fa-file-arrow-up"></i>
-                    </div>
-                    <h3>Arrastra archivos aquí</h3>
-                    <p>PDF, Imágenes, Audio, Video</p>
-                    <p style="font-size: 0.8rem; margin-top: 8px; color: #94a3b8;">
-                        MP3, MP4, WAV, PNG, JPG, PDF
-                    </p>
+                    <i class="fa-solid fa-cloud-arrow-up"></i>
+                    <p><strong>Haz clic o arrastra un archivo aquí</strong></p>
+                    <p>Máximo 500MB</p>
                 </div>
             </div>
             
             <div class="card">
-                <div class="card-title">
-                    <i class="fa-brands fa-youtube"></i> Transcribir desde URL
+                <div class="card-icon">
+                    <i class="fa-brands fa-youtube"></i>
                 </div>
-                <p style="margin-bottom: 20px; color: var(--text-sub);">
-                    Pega el enlace de YouTube u otro video público
-                </p>
-                <div class="youtube-input-group">
-                    <input 
-                        type="text" 
-                        id="youtube-url" 
-                        class="youtube-input" 
-                        placeholder="https://www.youtube.com/watch?v=..."
-                    >
+                <h3>YouTube</h3>
+                <p>Transcribe directamente desde YouTube</p>
+                <div class="youtube-input">
+                    <input type="text" id="youtube-url" placeholder="Pega la URL del video aquí...">
                     <button class="btn btn-primary" onclick="transcribeYouTube()">
                         <i class="fa-solid fa-play"></i> Transcribir
                     </button>
@@ -538,56 +637,52 @@ HTML_CONTENT = """
         
         <div class="loading" id="loading">
             <div class="spinner"></div>
-            <p class="loading-text">Procesando contenido...</p>
-            <p style="color: #94a3b8; font-size: 0.9rem; margin-top: 10px;">
-                Las transcripciones pueden tomar varios minutos
-            </p>
+            <h3>Procesando...</h3>
+            <p>Esto puede tomar unos momentos</p>
         </div>
         
-        <div class="results-area" id="results">
-            <div class="card">
-                <div class="result-header">
-                    <div class="file-info">
-                        <h3 id="result-filename">archivo.pdf</h3>
-                        <div class="file-meta">
-                            <span id="result-processor">Procesado</span>
-                        </div>
-                    </div>
-                    <span class="badge" id="result-badge">COMPLETADO</span>
+        <div class="results" id="results">
+            <div class="result-header">
+                <div class="result-info">
+                    <h3 id="result-filename">nombre_archivo.mp3</h3>
+                    <p id="result-processor">Procesador utilizado</p>
                 </div>
-                
-                <div class="stats">
-                    <div class="stat-item">
-                        <div class="stat-value" id="stat-chars">0</div>
-                        <div class="stat-label">Caracteres</div>
-                    </div>
-                    <div class="stat-item">
-                        <div class="stat-value" id="stat-words">0</div>
-                        <div class="stat-label">Palabras</div>
-                    </div>
-                    <div class="stat-item">
-                        <div class="stat-value" id="stat-lines">0</div>
-                        <div class="stat-label">Líneas</div>
-                    </div>
+                <span class="badge" id="result-badge">COMPLETADO</span>
+            </div>
+            
+            <div class="stats">
+                <div class="stat-card">
+                    <i class="fa-solid fa-font"></i>
+                    <strong id="stat-chars">0</strong>
+                    <span>Caracteres</span>
                 </div>
-                
-                <div class="text-display" style="margin-top: 20px;">
-                    <textarea id="result-text" class="text-area" placeholder="El contenido aparecerá aquí..."></textarea>
-                    <div class="action-bar">
-                        <button class="btn btn-outline btn-small" onclick="copyText()">
-                            <i class="fa-regular fa-copy"></i> Copiar
-                        </button>
-                        <button class="btn btn-secondary btn-small" onclick="downloadFile('txt')">
-                            <i class="fa-solid fa-download"></i> TXT
-                        </button>
-                        <button class="btn btn-primary btn-small" onclick="downloadFile('docx')">
-                            <i class="fa-solid fa-file-word"></i> DOCX
-                        </button>
-                        <button class="btn btn-outline btn-small" onclick="resetApp()">
-                            <i class="fa-solid fa-rotate-left"></i> Nuevo
-                        </button>
-                    </div>
+                <div class="stat-card">
+                    <i class="fa-solid fa-spell-check"></i>
+                    <strong id="stat-words">0</strong>
+                    <span>Palabras</span>
                 </div>
+                <div class="stat-card">
+                    <i class="fa-solid fa-list-ol"></i>
+                    <strong id="stat-lines">0</strong>
+                    <span>Líneas</span>
+                </div>
+            </div>
+            
+            <textarea id="result-text" placeholder="El texto transcrito aparecerá aquí..."></textarea>
+            
+            <div class="actions">
+                <button class="btn btn-primary btn-small" onclick="copyText()">
+                    <i class="fa-solid fa-copy"></i> Copiar
+                </button>
+                <button class="btn btn-primary btn-small" onclick="downloadFile('txt')">
+                    <i class="fa-solid fa-download"></i> TXT
+                </button>
+                <button class="btn btn-primary btn-small" onclick="downloadFile('docx')">
+                    <i class="fa-solid fa-file-word"></i> DOCX
+                </button>
+                <button class="btn btn-outline btn-small" onclick="resetApp()">
+                    <i class="fa-solid fa-rotate-left"></i> Nuevo
+                </button>
             </div>
         </div>
     </div>
@@ -810,7 +905,6 @@ async def download_text(text: str = Form(...), format: str = Form("txt")):
     )
 
 if __name__ == "__main__":
-    # Abrir navegador automáticamente
     import webbrowser
     from threading import Timer
     
